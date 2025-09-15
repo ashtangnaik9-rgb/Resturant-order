@@ -1,0 +1,240 @@
+<!doctype html>
+
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>P2P Restaurant Orders (No backend)</title>
+  <style>
+    :root{font-family:Inter,system-ui,Segoe UI,Arial;margin:0}
+    body{display:flex;min-height:100vh;align-items:stretch;background:#f3f4f6;color:#111}
+    .pane{flex:1;padding:18px;box-sizing:border-box}
+    header{display:flex;justify-content:space-between;align-items:center}
+    h1{margin:0;font-size:18px}
+    .card{background:white;border-radius:10px;padding:12px;box-shadow:0 6px 18px rgba(16,24,40,.06);}
+    .controls{display:flex;gap:8px;margin-top:12px}
+    textarea{width:100%;height:120px}
+    button{padding:8px 10px;border-radius:8px;border:0;background:#0ea5a4;color:white;cursor:pointer}
+    .muted{color:#666;font-size:13px}
+    .menu-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:10px;margin-top:12px}
+    .menu-item{background:#fff;padding:10px;border-radius:8px;display:flex;flex-direction:column;gap:8px}
+    .menu-item input{width:60px}
+    .orders-list{margin-top:12px;display:flex;flex-direction:column;gap:8px}
+    .order-row{background:#fff;padding:8px;border-radius:8px;display:flex;justify-content:space-between}
+    .small{font-size:13px}
+    .status{padding:6px 8px;border-radius:6px}
+    .connected{background:#10b981;color:white}
+    .disconnected{background:#ef4444;color:white}
+    footer{margin-top:12px;font-size:13px;color:#444}
+    .mode-btns{display:flex;gap:8px}
+  </style>
+</head>
+<body>
+  <div class="pane">
+    <div class="card">
+      <header>
+        <h1>P2P Restaurant Orders</h1>
+        <div class="mode-btns">
+          <button id="mode-waiter">Waiter (Controller)</button>
+          <button id="mode-kitchen">Kitchen (Display)</button>
+        </div>
+      </header><p class="muted">Works without a central backend. Uses WebRTC data channels for direct P2P messaging. Signaling is manual copy/paste (no server). Devices must be on same Wi‑Fi/Hotspot for best reliability.</p>
+
+  <div style="display:flex;gap:12px;flex-wrap:wrap">
+    <div style="flex:1;min-width:320px">
+      <div class="card">
+        <strong>Signaling (manual)</strong>
+        <div class="controls" style="margin-top:10px">
+          <button id="create-offer">Create Offer</button>
+          <button id="create-answer">Create Answer</button>
+          <button id="reset-conn">Reset</button>
+        </div>
+        <p class="small muted">1) One device clicks <strong>Create Offer</strong>, copies the long text and shares it (copy/paste or QR) with the other device.<br>2) Other device pastes into the box below and clicks <strong>Create Answer</strong>. The first device then pastes the answer into the box and clicks <strong>Accept Answer</strong> (button will appear). This establishes a P2P connection.</p>
+        <textarea id="signal-box" placeholder="Offer / Answer JSON"></textarea>
+        <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
+          <button id="paste-remote">Paste Remote</button>
+          <button id="accept-answer" style="display:none">Accept Answer</button>
+          <button id="copy-local">Copy Local</button>
+          <span id="conn-status" class="status disconnected">Disconnected</span>
+        </div>
+      </div>
+
+      <div class="card" style="margin-top:12px">
+        <strong>Console</strong>
+        <pre id="log" style="height:160px;overflow:auto;margin:8px 0;padding:8px;background:#0f172a;color:#e6f3f2;border-radius:6px"></pre>
+        <footer>Host on GitHub Pages: push this file to a repo and enable Pages (branch: main, folder: root).</footer>
+      </div>
+    </div>
+
+    <div style="flex:1;min-width:320px">
+      <div class="card" id="waiter-panel" style="display:none">
+        <strong>Menu — Waiter / Controller</strong>
+        <div class="menu-grid" id="menu"></div>
+        <div style="margin-top:12px">
+          <button id="send-order">Send Order</button>
+        </div>
+      </div>
+
+      <div class="card" id="kitchen-panel" style="display:none">
+        <strong>Kitchen — Table Orders</strong>
+        <div class="orders-list" id="orders"></div>
+        <div style="margin-top:10px">
+          <button id="clear-orders">Clear All</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+  </div><script>
+// Simple P2P DataChannel restaurant order app
+const logEl = id('log');
+function log(...t){ logEl.textContent += t.join(' ') + '\n'; logEl.scrollTop = logEl.scrollHeight; }
+
+const menuItems = [
+  {id:1,name:'Margherita Pizza'},
+  {id:2,name:'Cheese Burger'},
+  {id:3,name:'French Fries'},
+  {id:4,name:'Caesar Salad'},
+  {id:5,name:'Coke'},
+  {id:6,name:'Coffee'}
+];
+
+let pc = null, dc = null;
+let localDesc = null;
+let remoteDescText = '';
+let role = null; // 'waiter' or 'kitchen'
+
+// UI refs
+const menuEl = id('menu');
+const ordersEl = id('orders');
+const connStatus = id('conn-status');
+
+function renderMenu(){ menuEl.innerHTML=''; menuItems.forEach(it=>{
+  const div = document.createElement('div'); div.className='menu-item';
+  div.innerHTML = `<strong>${it.name}</strong><div><label>Qty: <input type=number min=0 value=1 data-id=${it.id}></label></div>`;
+  menuEl.appendChild(div);
+}); }
+
+function id(i){return document.getElementById(i)}
+
+function updateConnStatus(connected){
+  connStatus.textContent = connected ? 'Connected' : 'Disconnected';
+  connStatus.className = 'status ' + (connected ? 'connected':'disconnected');
+}
+
+function makePeerConnection(){
+  pc = new RTCPeerConnection({ iceServers:[{urls:'stun:stun.l.google.com:19302'}] });
+  pc.oniceconnectionstatechange = ()=> log('ICE state', pc.iceConnectionState);
+  pc.onicecandidate = e=>{
+    if(e.candidate) return; // wait until gathering finished
+    id('signal-box').value = JSON.stringify(pc.localDescription);
+    log('Local description ready. Copy it to remote device.');
+  }
+  pc.ondatachannel = e=>{
+    dc = e.channel; setupDC();
+  }
+}
+
+function setupDC(){
+  if(!dc) return;
+  dc.onopen = ()=>{ log('DataChannel open'); updateConnStatus(true); }
+  dc.onclose = ()=>{ log('DataChannel closed'); updateConnStatus(false); }
+  dc.onmessage = e=>{
+    try{ const msg = JSON.parse(e.data); handleMessage(msg); }catch(err){ log('Bad msg', e.data); }
+  }
+}
+
+function handleMessage(msg){
+  if(msg.type === 'order'){
+    addOrder(msg.payload, false);
+  } else if(msg.type === 'clear'){
+    clearOrders(false);
+  }
+}
+
+function addOrder(order, local=true){
+  // order {table, items:[{id,name,q}]}
+  const row = document.createElement('div'); row.className='order-row';
+  row.innerHTML = `<div><strong>Table ${order.table}</strong><div class=small>${order.items.map(i=>i.name+ ' x'+i.q).join(', ')}</div></div><div class=small>${local?'<em>local</em>':''}</div>`;
+  ordersEl.prepend(row);
+}
+
+function clearOrders(local=true){ ordersEl.innerHTML=''; if(local && dc && dc.readyState==='open') dc.send(JSON.stringify({type:'clear'})); }
+
+// Controls wiring
+id('mode-waiter').onclick = ()=>{ role='waiter'; id('waiter-panel').style.display='block'; id('kitchen-panel').style.display='none'; renderMenu(); }
+id('mode-kitchen').onclick = ()=>{ role='kitchen'; id('waiter-panel').style.display='none'; id('kitchen-panel').style.display='block'; }
+
+id('create-offer').onclick = async ()=>{
+  makePeerConnection();
+  dc = pc.createDataChannel('orders'); setupDC();
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  log('Offer created. Copy local SDP and paste into the other device.');
+  id('copy-local').style.display='inline-block';
+}
+
+id('create-answer').onclick = async ()=>{
+  // user must paste remote offer into textarea first
+  const txt = id('signal-box').value.trim(); if(!txt){ alert('Paste remote offer into the box first'); return; }
+  const remote = JSON.parse(txt);
+  makePeerConnection();
+  await pc.setRemoteDescription(remote);
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  // localDescription will be placed into the signal-box by onicecandidate
+  log('Answer created. Copy local SDP and send back to offerer.');
+}
+
+id('paste-remote').onclick = async ()=>{
+  // Paste remote description into connection
+  const txt = id('signal-box').value.trim(); if(!txt){ alert('Paste remote SDP into the box first'); return; }
+  const remote = JSON.parse(txt);
+  if(!pc) makePeerConnection();
+  await pc.setRemoteDescription(remote);
+  log('Remote description set.');
+}
+
+id('accept-answer').onclick = async ()=>{
+  const txt = id('signal-box').value.trim(); if(!txt){ alert('Paste answer text here then click Accept Answer'); return; }
+  const remote = JSON.parse(txt);
+  await pc.setRemoteDescription(remote);
+  log('Answer accepted.');
+}
+
+id('copy-local').onclick = ()=>{ id('signal-box').select(); document.execCommand('copy'); log('Local SDP copied to clipboard'); }
+
+id('reset-conn').onclick = ()=>{ if(dc){try{dc.close()}catch{} } if(pc){ try{pc.close()}catch{} } pc=null; dc=null; id('signal-box').value=''; updateConnStatus(false); log('Reset connection'); }
+
+id('send-order').onclick = ()=>{
+  if(!dc || dc.readyState!=='open'){ alert('DataChannel not open. Connect devices first.'); return; }
+  // collect selected items and qty
+  const inputs = Array.from(document.querySelectorAll('#menu input')); const items = [];
+  inputs.forEach(inp=>{ const q = Number(inp.value); if(q>0){ const idn = Number(inp.dataset.id); const it = menuItems.find(m=>m.id===idn); items.push({id:idn,name:it.name,q}) }});
+  if(items.length===0){ alert('Select at least one item (qty>0)'); return; }
+  const table = prompt('Table number (e.g. 1)') || '1';
+  const order = {table, items};
+  dc.send(JSON.stringify({type:'order', payload:order}));
+  addOrder(order,true);
+  log('Order sent');
+}
+
+id('clear-orders').onclick = ()=>{
+  if(confirm('Clear all orders?')) clearOrders(true);
+}
+
+// Init
+updateConnStatus(false);
+renderMenu();
+
+// Add a small helper to show Accept Answer button when it looks like an answer (type: answer)
+const signalBox = id('signal-box');
+signalBox.addEventListener('input', ()=>{
+  try{ const v = JSON.parse(signalBox.value); if(v && v.type && v.type.indexOf('answer')>=0){ id('accept-answer').style.display='inline-block'; } else id('accept-answer').style.display='none'; }catch(e){ id('accept-answer').style.display='none'; }
+});
+
+log('App ready. Choose a mode. For best results open this page on both devices and use the manual signaling steps.');
+</script></body>
+</html>
